@@ -16,7 +16,7 @@ VENV_DIR = Path.home() / ".cache" / "mp4_silence_removal" / "venv"
 VENV_MARKER = "MP4SR_IN_VENV"
 PIP_PACKAGES: list[str] = ["silero-vad", "numpy"]
 
-PADDING_SECONDS = 3.0
+PADDING_SECONDS = 5.0
 VAD_THRESHOLD = 0.3
 VAD_MIN_SPEECH_MS = 250
 VAD_MIN_SILENCE_MS = 300
