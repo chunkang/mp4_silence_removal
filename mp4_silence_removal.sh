@@ -67,6 +67,7 @@ def find_mp4s(directory: Path) -> list[Path]:
         if p.is_file()
         and p.suffix.lower() == ".mp4"
         and not p.name.startswith(OUTPUT_PREFIX)
+        and not p.name.startswith(".")
     )
 
 
