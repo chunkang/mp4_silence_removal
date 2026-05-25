@@ -227,7 +227,7 @@ def cut(source: Path, ranges: list[tuple[float, float]], output: Path, volume_ga
         concat_tail = f"{concat_in}concat=n={len(ranges)}:v=1:a=1[v][a]"
     filter_complex = "".join(parts) + concat_tail
     subprocess.run(
-        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-stats",
          "-i", str(source),
          "-filter_complex", filter_complex,
          "-map", "[v]", "-map", "[a]",
