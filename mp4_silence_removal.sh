@@ -20,6 +20,7 @@ PADDING_SECONDS = 3.0
 VAD_THRESHOLD = 0.3
 VAD_MIN_SPEECH_MS = 250
 VAD_MIN_SILENCE_MS = 300
+VOLUME_GAIN = 2.0
 
 OUTPUT_PREFIX = "_mp4sr_"
 CONSOLIDATED_NAME = f"{OUTPUT_PREFIX}consolidated.mp4"
@@ -158,6 +159,26 @@ def prompt_threshold(default: float) -> float:
         return value
 
 
+def prompt_volume(default: float) -> float:
+    while True:
+        try:
+            answer = input(f"voice volume multiplier (1.0 = unchanged) [{default}]: ")
+        except EOFError:
+            return default
+        answer = answer.strip()
+        if not answer:
+            return default
+        try:
+            value = float(answer)
+        except ValueError:
+            print(f"[mp4sr] invalid number: {answer!r}")
+            continue
+        if value <= 0:
+            print("[mp4sr] volume multiplier must be > 0")
+            continue
+        return value
+
+
 def prompt_buffer(default: float) -> float:
     while True:
         try:
@@ -194,13 +215,17 @@ def prompt_delete(originals: list[Path]) -> None:
             print(f"[mp4sr] failed to delete {p.name}: {e}")
 
 
-def cut(source: Path, ranges: list[tuple[float, float]], output: Path) -> None:
+def cut(source: Path, ranges: list[tuple[float, float]], output: Path, volume_gain: float) -> None:
     parts = []
     for i, (s, e) in enumerate(ranges):
         parts.append(f"[0:v]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS[v{i}];")
         parts.append(f"[0:a]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a{i}];")
     concat_in = "".join(f"[v{i}][a{i}]" for i in range(len(ranges)))
-    filter_complex = "".join(parts) + f"{concat_in}concat=n={len(ranges)}:v=1:a=1[v][a]"
+    if volume_gain != 1.0:
+        concat_tail = f"{concat_in}concat=n={len(ranges)}:v=1:a=1[v][araw];[araw]volume={volume_gain}[a]"
+    else:
+        concat_tail = f"{concat_in}concat=n={len(ranges)}:v=1:a=1[v][a]"
+    filter_complex = "".join(parts) + concat_tail
     subprocess.run(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
          "-i", str(source),
@@ -242,6 +267,7 @@ def main() -> None:
 
     padding = prompt_buffer(PADDING_SECONDS)
     threshold = prompt_threshold(VAD_THRESHOLD)
+    volume_gain = prompt_volume(VOLUME_GAIN)
 
     print("[mp4sr] detecting voice (Silero VAD)")
     voice = pad_and_merge(detect_voice(consolidated, threshold), padding, total)
@@ -251,7 +277,7 @@ def main() -> None:
     print(f"[mp4sr] {len(voice)} voice range(s), keeping {kept:.1f}s ({kept / total * 100:.0f}%)")
 
     print(f"[mp4sr] writing -> {final.name}")
-    cut(consolidated, voice, final)
+    cut(consolidated, voice, final, volume_gain)
     print(f"[mp4sr] done: {final}")
 
 
