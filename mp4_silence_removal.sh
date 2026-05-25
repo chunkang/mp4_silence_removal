@@ -17,7 +17,7 @@ VENV_MARKER = "MP4SR_IN_VENV"
 PIP_PACKAGES: list[str] = ["silero-vad", "numpy"]
 
 PADDING_SECONDS = 3.0
-VAD_THRESHOLD = 0.5
+VAD_THRESHOLD = 0.3
 VAD_MIN_SPEECH_MS = 250
 VAD_MIN_SILENCE_MS = 300
 
@@ -94,7 +94,7 @@ def probe_duration(mp4: Path) -> float:
     return float(json.loads(out)["format"]["duration"])
 
 
-def detect_voice(mp4: Path) -> list[tuple[float, float]]:
+def detect_voice(mp4: Path, threshold: float) -> list[tuple[float, float]]:
     """Use Silero VAD to find ranges containing human speech (in seconds)."""
     import numpy as np
     import torch
@@ -113,7 +113,7 @@ def detect_voice(mp4: Path) -> list[tuple[float, float]]:
     segments = get_speech_timestamps(
         wav, model,
         sampling_rate=16000,
-        threshold=VAD_THRESHOLD,
+        threshold=threshold,
         min_speech_duration_ms=VAD_MIN_SPEECH_MS,
         min_silence_duration_ms=VAD_MIN_SILENCE_MS,
         return_seconds=True,
@@ -133,6 +133,49 @@ def pad_and_merge(ranges: list[tuple[float, float]], pad: float, total: float) -
         else:
             merged.append((s, e))
     return merged
+
+
+def prompt_threshold(default: float) -> float:
+    print("[mp4sr] VAD threshold (0.0-1.0):")
+    print("        0.7 -> only keep very confident speech (fewer false positives, may clip quiet talking)")
+    print("        0.3 -> catch quieter / less clear speech (more false positives from background noise)")
+    while True:
+        try:
+            answer = input(f"threshold [{default}]: ")
+        except EOFError:
+            return default
+        answer = answer.strip()
+        if not answer:
+            return default
+        try:
+            value = float(answer)
+        except ValueError:
+            print(f"[mp4sr] invalid number: {answer!r}")
+            continue
+        if not 0.0 <= value <= 1.0:
+            print("[mp4sr] threshold must be between 0.0 and 1.0")
+            continue
+        return value
+
+
+def prompt_buffer(default: float) -> float:
+    while True:
+        try:
+            answer = input(f"buffer seconds before/after voice [{default}]: ")
+        except EOFError:
+            return default
+        answer = answer.strip()
+        if not answer:
+            return default
+        try:
+            value = float(answer)
+        except ValueError:
+            print(f"[mp4sr] invalid number: {answer!r}")
+            continue
+        if value < 0:
+            print("[mp4sr] buffer must be >= 0")
+            continue
+        return value
 
 
 def prompt_delete(originals: list[Path]) -> None:
@@ -197,8 +240,11 @@ def main() -> None:
     total = probe_duration(consolidated)
     print(f"[mp4sr] duration: {total:.1f}s")
 
+    padding = prompt_buffer(PADDING_SECONDS)
+    threshold = prompt_threshold(VAD_THRESHOLD)
+
     print("[mp4sr] detecting voice (Silero VAD)")
-    voice = pad_and_merge(detect_voice(consolidated), PADDING_SECONDS, total)
+    voice = pad_and_merge(detect_voice(consolidated, threshold), padding, total)
     if not voice:
         sys.exit("no voice detected; nothing to write")
     kept = sum(e - s for s, e in voice)
