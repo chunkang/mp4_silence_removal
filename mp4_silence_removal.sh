@@ -12,19 +12,30 @@ import tempfile
 import venv
 from pathlib import Path
 
+# Quiet the "unauthenticated requests to the HF Hub / set a HF_TOKEN" advisory
+# that silero-vad and faster-whisper emit while downloading models. Set before
+# any huggingface_hub import so it takes effect. Downloads work fine without a token.
+os.environ.setdefault("HF_HUB_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
 VENV_DIR = Path.home() / ".cache" / "mp4_silence_removal" / "venv"
 VENV_MARKER = "MP4SR_IN_VENV"
-PIP_PACKAGES: list[str] = ["silero-vad", "numpy"]
+PIP_PACKAGES: list[str] = ["silero-vad", "numpy", "faster-whisper"]
+
+SETTINGS_FILE = Path.home() / ".config" / "mp4_silence_removal" / "settings.json"
 
 PADDING_SECONDS = 5.0
 VAD_THRESHOLD = 0.3
 VAD_MIN_SPEECH_MS = 250
 VAD_MIN_SILENCE_MS = 300
 VOLUME_GAIN = 2.0
+WHISPER_MODEL = "medium"
 
 OUTPUT_PREFIX = "_mp4sr_"
 CONSOLIDATED_NAME = f"{OUTPUT_PREFIX}consolidated.mp4"
 FINAL_NAME = f"{OUTPUT_PREFIX}voice_only.mp4"
+SUBTITLED_NAME = f"{OUTPUT_PREFIX}voice_only_subtitled.mp4"
+SRT_NAME = f"{OUTPUT_PREFIX}voice_only.srt"
 
 
 # ---------- bootstrap ----------
@@ -57,6 +68,23 @@ def _ensure_ffmpeg() -> None:
         subprocess.check_call(["brew", "install", "ffmpeg"])
         return
     sys.exit("error: ffmpeg/ffprobe not found and Homebrew is unavailable; install ffmpeg manually")
+
+
+# ---------- settings ----------
+
+def load_settings() -> dict:
+    try:
+        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(settings: dict) -> None:
+    try:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    except OSError as e:
+        print(f"[mp4sr] warning: could not save settings: {e}")
 
 
 # ---------- pipeline ----------
@@ -200,6 +228,34 @@ def prompt_buffer(default: float) -> float:
         return value
 
 
+def prompt_subtitles(default: bool) -> bool:
+    hint = "Y/n" if default else "y/N"
+    try:
+        answer = input(f"generate burned-in subtitles via Whisper? [{hint}]: ")
+    except EOFError:
+        return default
+    answer = answer.strip().lower()
+    if not answer:
+        return default
+    return answer == "y"
+
+
+def prompt_whisper_model(default: str) -> str:
+    valid = {"tiny", "base", "small", "medium", "large-v3"}
+    while True:
+        try:
+            answer = input(f"whisper model (tiny/base/small/medium/large-v3) [{default}]: ")
+        except EOFError:
+            return default
+        answer = answer.strip()
+        if not answer:
+            return default
+        if answer not in valid:
+            print(f"[mp4sr] unknown model: {answer!r}")
+            continue
+        return answer
+
+
 def prompt_delete(originals: list[Path]) -> None:
     try:
         answer = input(f"delete {len(originals)} original mp4 file(s)? [y/N]: ")
@@ -214,6 +270,75 @@ def prompt_delete(originals: list[Path]) -> None:
             print(f"[mp4sr] deleted {p.name}")
         except OSError as e:
             print(f"[mp4sr] failed to delete {p.name}: {e}")
+
+
+def transcribe(mp4: Path, model_size: str) -> list[tuple[float, float, str]]:
+    """Run Whisper on the final mp4 and return [(start, end, text)] in seconds."""
+    from faster_whisper import WhisperModel
+    print(f"[mp4sr] loading whisper model: {model_size} (downloads on first use)")
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    print("[mp4sr] transcribing")
+    segments, _ = model.transcribe(str(mp4), vad_filter=False)
+    out: list[tuple[float, float, str]] = []
+    for seg in segments:
+        text = seg.text.strip()
+        if text:
+            out.append((float(seg.start), float(seg.end), text))
+    return out
+
+
+def _fmt_srt_time(t: float) -> str:
+    if t < 0:
+        t = 0.0
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    ms = int(round((t - int(t)) * 1000))
+    if ms == 1000:
+        s += 1
+        ms = 0
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def write_srt(segments: list[tuple[float, float, str]], path: Path) -> None:
+    blocks: list[str] = []
+    for i, (start, end, text) in enumerate(segments, 1):
+        blocks.append(f"{i}\n{_fmt_srt_time(start)} --> {_fmt_srt_time(end)}\n{text}\n")
+    path.write_text("\n".join(blocks), encoding="utf-8")
+
+
+def burn_subtitles(source: Path, srt: Path, output: Path) -> None:
+    # Run ffmpeg from the srt's directory so we pass a bare filename and
+    # avoid the subtitles filter's painful path escaping rules.
+    #
+    # force_style overrides the ASS style:
+    #   BorderStyle=3            -> draw a box behind the text
+    #   Outline=1                -> box padding around the text (px)
+    #   Shadow=0                 -> no drop shadow
+    #   OutlineColour=&H40000000 -> box colour in &HAABBGGRR (alpha 0x40 = mostly
+    #                               opaque, pure black). Alpha is inverted in
+    #                               ASS: 00 = opaque, FF = fully transparent.
+    #   MarginL/MarginR=5        -> narrow horizontal margins.
+    #   MarginV=40               -> lift subtitles ~40px up from the bottom.
+    #   FontName=Apple SD Gothic Neo
+    #                            -> one font covering BOTH Korean and Latin.
+    #                               Without this, libass falls back to a
+    #                               separate CJK font for Hangul runs, whose
+    #                               ascent/descent differ from the Latin font,
+    #                               so the BorderStyle=3 box is sized per-run
+    #                               and its top/bottom edges step up and down
+    #                               where the script changes. Pinning one font
+    #                               keeps the box edges straight.
+    style = "FontName=Apple SD Gothic Neo,Outline=1,Shadow=0,OutlineColour=&H80000000,MarginV=40,BorderStyle=3"
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-stats",
+         "-i", str(source.resolve()),
+         "-vf", f"subtitles={srt.name}:force_style='{style}'",
+         "-c:a", "copy",
+         str(output.resolve())],
+        check=True,
+        cwd=str(srt.parent),
+    )
 
 
 def cut(source: Path, ranges: list[tuple[float, float]], output: Path, volume_gain: float) -> None:
@@ -241,45 +366,94 @@ def main() -> None:
     cwd = Path.cwd()
     consolidated = cwd / CONSOLIDATED_NAME
     final = cwd / FINAL_NAME
+    srt_path = cwd / SRT_NAME
 
-    recreate = True
-    if consolidated.exists():
+    settings = load_settings()
+
+    make_final = True
+    if final.exists():
         try:
-            answer = input(f"{consolidated.name} exists. recreate? [y/N]: ")
+            answer = input(f"{final.name} exists. recreate? [y/N]: ")
         except EOFError:
             answer = ""
-        recreate = answer.strip().lower() == "y"
+        make_final = answer.strip().lower() == "y"
 
-    if recreate:
-        mp4s = find_mp4s(cwd)
-        if not mp4s:
-            sys.exit(f"no .mp4 files found in {cwd}")
-        print(f"[mp4sr] {len(mp4s)} input file(s), in order:")
-        for p in mp4s:
-            print(f"        {p.name}")
-        print(f"[mp4sr] consolidating -> {consolidated.name}")
-        consolidate(mp4s, consolidated)
-        prompt_delete(mp4s)
+    if make_final:
+        recreate = True
+        if consolidated.exists():
+            try:
+                answer = input(f"{consolidated.name} exists. recreate? [y/N]: ")
+            except EOFError:
+                answer = ""
+            recreate = answer.strip().lower() == "y"
+
+        if recreate:
+            mp4s = find_mp4s(cwd)
+            if not mp4s:
+                sys.exit(f"no .mp4 files found in {cwd}")
+            print(f"[mp4sr] {len(mp4s)} input file(s), in order:")
+            for p in mp4s:
+                print(f"        {p.name}")
+            print(f"[mp4sr] consolidating -> {consolidated.name}")
+            consolidate(mp4s, consolidated)
+            prompt_delete(mp4s)
+        else:
+            print(f"[mp4sr] reusing existing {consolidated.name}")
+
+        total = probe_duration(consolidated)
+        print(f"[mp4sr] duration: {total:.1f}s")
+
+        padding = prompt_buffer(settings.get("padding", PADDING_SECONDS))
+        threshold = prompt_threshold(settings.get("threshold", VAD_THRESHOLD))
+        volume_gain = prompt_volume(settings.get("volume_gain", VOLUME_GAIN))
+        settings.update(padding=padding, threshold=threshold, volume_gain=volume_gain)
+        save_settings(settings)
+
+        print("[mp4sr] detecting voice (Silero VAD)")
+        voice = pad_and_merge(detect_voice(consolidated, threshold), padding, total)
+        if not voice:
+            sys.exit("no voice detected; nothing to write")
+        kept = sum(e - s for s, e in voice)
+        print(f"[mp4sr] {len(voice)} voice range(s), keeping {kept:.1f}s ({kept / total * 100:.0f}%)")
+
+        print(f"[mp4sr] writing -> {final.name}")
+        cut(consolidated, voice, final, volume_gain)
+        print(f"[mp4sr] done: {final}")
     else:
-        print(f"[mp4sr] reusing existing {consolidated.name}")
+        print(f"[mp4sr] reusing existing {final.name}")
 
-    total = probe_duration(consolidated)
-    print(f"[mp4sr] duration: {total:.1f}s")
+    want_subs = prompt_subtitles(settings.get("want_subs", False))
+    settings["want_subs"] = want_subs
+    if not want_subs:
+        save_settings(settings)
+        return
 
-    padding = prompt_buffer(PADDING_SECONDS)
-    threshold = prompt_threshold(VAD_THRESHOLD)
-    volume_gain = prompt_volume(VOLUME_GAIN)
+    reuse_srt = False
+    if srt_path.exists():
+        try:
+            answer = input(f"{srt_path.name} exists. reuse it? [Y/n]: ")
+        except EOFError:
+            answer = ""
+        reuse_srt = answer.strip().lower() != "n"
 
-    print("[mp4sr] detecting voice (Silero VAD)")
-    voice = pad_and_merge(detect_voice(consolidated, threshold), padding, total)
-    if not voice:
-        sys.exit("no voice detected; nothing to write")
-    kept = sum(e - s for s, e in voice)
-    print(f"[mp4sr] {len(voice)} voice range(s), keeping {kept:.1f}s ({kept / total * 100:.0f}%)")
+    if reuse_srt:
+        print(f"[mp4sr] reusing existing {srt_path.name}")
+        save_settings(settings)
+    else:
+        whisper_model = prompt_whisper_model(settings.get("whisper_model", WHISPER_MODEL))
+        settings["whisper_model"] = whisper_model
+        save_settings(settings)
+        segments = transcribe(final, whisper_model)
+        if not segments:
+            print("[mp4sr] no speech transcribed; skipping subtitle burn")
+            return
+        write_srt(segments, srt_path)
+        print(f"[mp4sr] wrote {srt_path.name} ({len(segments)} cue(s))")
 
-    print(f"[mp4sr] writing -> {final.name}")
-    cut(consolidated, voice, final, volume_gain)
-    print(f"[mp4sr] done: {final}")
+    subtitled = cwd / SUBTITLED_NAME
+    print(f"[mp4sr] burning subtitles -> {subtitled.name}")
+    burn_subtitles(final, srt_path, subtitled)
+    print(f"[mp4sr] done: {subtitled}")
 
 
 if __name__ == "__main__":
