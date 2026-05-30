@@ -14,7 +14,7 @@ Run it from a directory full of `.mp4` files and it will, in order:
 3. **Cut** the consolidated video down to just the voice ranges, writing
    `<prefix>voice_only.mp4`. Optionally boosts the voice volume.
 4. **Subtitle** (optional): transcribe the trimmed audio with faster-whisper,
-   write an `.srt`, and burn it into `<prefix>voice_only_subtitled.mp4`.
+   write a WebVTT `.vtt`, and burn it into `<prefix>voice_only_subtitled.mp4`.
 
 Each stage notices existing output and asks before recreating it, so you can
 re-run to redo just the part you care about.
@@ -85,11 +85,26 @@ The style lives in `burn_subtitles()` if you want to tweak it. To use a
 different font, pick any with full Korean + Latin coverage (e.g. `NanumGothic`
 or `Noto Sans CJK KR`).
 
+### Keeping subtitles in sync
+
+Cue timing comes entirely from Whisper, so the format (SRT vs WebVTT) makes no
+difference to sync — the `.vtt` carries the same timestamps the burned-in
+subtitles use. To keep those timestamps accurate, `transcribe()` runs Whisper
+with VAD filtering, word-level timestamps, and `condition_on_previous_text=False`,
+and takes each cue's start/end from its first and last word rather than the
+coarser segment estimate.
+
+If you rebuild `<prefix>voice_only.mp4`, the `.vtt` is regenerated automatically
+(reusing an old subtitle file from a different cut would desync it) — you're only
+offered to reuse an existing `.vtt` when the video was not rebuilt. If subtitles
+still look off on a particular clip, try a larger Whisper model (e.g.
+`large-v3`).
+
 ## Output files
 
 - `<prefix>consolidated.mp4` — all inputs concatenated
 - `<prefix>voice_only.mp4` — silence removed
-- `<prefix>voice_only.srt` — transcribed subtitles (if enabled)
+- `<prefix>voice_only.vtt` — transcribed subtitles in WebVTT format (if enabled)
 - `<prefix>voice_only_subtitled.mp4` — final, with subtitles burned in
 
 (The `<prefix>` is `_mp4sr_`. When all inputs are consolidated, the script

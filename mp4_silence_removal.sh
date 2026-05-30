@@ -35,7 +35,7 @@ OUTPUT_PREFIX = "_mp4sr_"
 CONSOLIDATED_NAME = f"{OUTPUT_PREFIX}consolidated.mp4"
 FINAL_NAME = f"{OUTPUT_PREFIX}voice_only.mp4"
 SUBTITLED_NAME = f"{OUTPUT_PREFIX}voice_only_subtitled.mp4"
-SRT_NAME = f"{OUTPUT_PREFIX}voice_only.srt"
+VTT_NAME = f"{OUTPUT_PREFIX}voice_only.vtt"
 
 
 # ---------- bootstrap ----------
@@ -278,16 +278,35 @@ def transcribe(mp4: Path, model_size: str) -> list[tuple[float, float, str]]:
     print(f"[mp4sr] loading whisper model: {model_size} (downloads on first use)")
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
     print("[mp4sr] transcribing")
-    segments, _ = model.transcribe(str(mp4), vad_filter=False)
+    # vad_filter=True: skip the padded near-silence around each voice range so
+    #   Whisper does not hallucinate text there and its 30s decode window does
+    #   not drift; faster-whisper maps the timestamps back to the real timeline.
+    # word_timestamps=True: align segment start/end to actual word onsets (DTW)
+    #   instead of coarse token-attention estimates.
+    # condition_on_previous_text=False: stop one bad segment from cascading a
+    #   timing/repetition error into everything after it.
+    # These three together are what keep the .vtt in sync; see README.
+    segments, _ = model.transcribe(
+        str(mp4),
+        vad_filter=True,
+        word_timestamps=True,
+        condition_on_previous_text=False,
+    )
     out: list[tuple[float, float, str]] = []
     for seg in segments:
         text = seg.text.strip()
-        if text:
-            out.append((float(seg.start), float(seg.end), text))
+        if not text:
+            continue
+        # Prefer the first/last word's timing when available: it tracks the
+        # spoken audio more tightly than the segment-level estimate.
+        words = getattr(seg, "words", None) or []
+        start = words[0].start if words else seg.start
+        end = words[-1].end if words else seg.end
+        out.append((float(start), float(end), text))
     return out
 
 
-def _fmt_srt_time(t: float) -> str:
+def _fmt_vtt_time(t: float) -> str:
     if t < 0:
         t = 0.0
     h = int(t // 3600)
@@ -297,18 +316,18 @@ def _fmt_srt_time(t: float) -> str:
     if ms == 1000:
         s += 1
         ms = 0
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
-def write_srt(segments: list[tuple[float, float, str]], path: Path) -> None:
-    blocks: list[str] = []
+def write_vtt(segments: list[tuple[float, float, str]], path: Path) -> None:
+    blocks: list[str] = ["WEBVTT\n"]
     for i, (start, end, text) in enumerate(segments, 1):
-        blocks.append(f"{i}\n{_fmt_srt_time(start)} --> {_fmt_srt_time(end)}\n{text}\n")
+        blocks.append(f"{i}\n{_fmt_vtt_time(start)} --> {_fmt_vtt_time(end)}\n{text}\n")
     path.write_text("\n".join(blocks), encoding="utf-8")
 
 
-def burn_subtitles(source: Path, srt: Path, output: Path) -> None:
-    # Run ffmpeg from the srt's directory so we pass a bare filename and
+def burn_subtitles(source: Path, vtt: Path, output: Path) -> None:
+    # Run ffmpeg from the vtt's directory so we pass a bare filename and
     # avoid the subtitles filter's painful path escaping rules.
     #
     # force_style overrides the ASS style:
@@ -333,11 +352,11 @@ def burn_subtitles(source: Path, srt: Path, output: Path) -> None:
     subprocess.run(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-stats",
          "-i", str(source.resolve()),
-         "-vf", f"subtitles={srt.name}:force_style='{style}'",
+         "-vf", f"subtitles={vtt.name}:force_style='{style}'",
          "-c:a", "copy",
          str(output.resolve())],
         check=True,
-        cwd=str(srt.parent),
+        cwd=str(vtt.parent),
     )
 
 
@@ -366,7 +385,7 @@ def main() -> None:
     cwd = Path.cwd()
     consolidated = cwd / CONSOLIDATED_NAME
     final = cwd / FINAL_NAME
-    srt_path = cwd / SRT_NAME
+    vtt_path = cwd / VTT_NAME
 
     settings = load_settings()
 
@@ -428,16 +447,21 @@ def main() -> None:
         save_settings(settings)
         return
 
-    reuse_srt = False
-    if srt_path.exists():
+    # Only offer to reuse an existing .vtt when the video was NOT rebuilt this
+    # run. If we just recut final with (possibly) different settings, the old
+    # cue times are from the previous cut and would be desynced against it.
+    reuse_vtt = False
+    if vtt_path.exists() and not make_final:
         try:
-            answer = input(f"{srt_path.name} exists. reuse it? [Y/n]: ")
+            answer = input(f"{vtt_path.name} exists. reuse it? [Y/n]: ")
         except EOFError:
             answer = ""
-        reuse_srt = answer.strip().lower() != "n"
+        reuse_vtt = answer.strip().lower() != "n"
+    elif vtt_path.exists() and make_final:
+        print(f"[mp4sr] {final.name} was rebuilt; regenerating {vtt_path.name} to keep it in sync")
 
-    if reuse_srt:
-        print(f"[mp4sr] reusing existing {srt_path.name}")
+    if reuse_vtt:
+        print(f"[mp4sr] reusing existing {vtt_path.name}")
         save_settings(settings)
     else:
         whisper_model = prompt_whisper_model(settings.get("whisper_model", WHISPER_MODEL))
@@ -447,12 +471,12 @@ def main() -> None:
         if not segments:
             print("[mp4sr] no speech transcribed; skipping subtitle burn")
             return
-        write_srt(segments, srt_path)
-        print(f"[mp4sr] wrote {srt_path.name} ({len(segments)} cue(s))")
+        write_vtt(segments, vtt_path)
+        print(f"[mp4sr] wrote {vtt_path.name} ({len(segments)} cue(s))")
 
     subtitled = cwd / SUBTITLED_NAME
     print(f"[mp4sr] burning subtitles -> {subtitled.name}")
-    burn_subtitles(final, srt_path, subtitled)
+    burn_subtitles(final, vtt_path, subtitled)
     print(f"[mp4sr] done: {subtitled}")
 
 
