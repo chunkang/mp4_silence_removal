@@ -165,13 +165,27 @@ def pad_and_merge(ranges: list[tuple[float, float]], pad: float, total: float) -
     return merged
 
 
+def safe_input(prompt: str) -> str:
+    """input() that survives undecodable keystrokes.
+
+    A stray IME / partial multibyte byte (e.g. 0xe3) makes the stdin reader
+    raise UnicodeDecodeError; treat that like an empty line so callers fall
+    back to their default or re-prompt. EOFError still propagates.
+    """
+    try:
+        return input(prompt)
+    except UnicodeDecodeError:
+        print()
+        return ""
+
+
 def prompt_threshold(default: float) -> float:
     print("[mp4sr] VAD threshold (0.0-1.0):")
     print("        0.7 -> only keep very confident speech (fewer false positives, may clip quiet talking)")
     print("        0.3 -> catch quieter / less clear speech (more false positives from background noise)")
     while True:
         try:
-            answer = input(f"threshold [{default}]: ")
+            answer = safe_input(f"threshold [{default}]: ")
         except EOFError:
             return default
         answer = answer.strip()
@@ -191,7 +205,7 @@ def prompt_threshold(default: float) -> float:
 def prompt_volume(default: float) -> float:
     while True:
         try:
-            answer = input(f"voice volume multiplier (1.0 = unchanged) [{default}]: ")
+            answer = safe_input(f"voice volume multiplier (1.0 = unchanged) [{default}]: ")
         except EOFError:
             return default
         answer = answer.strip()
@@ -211,7 +225,7 @@ def prompt_volume(default: float) -> float:
 def prompt_buffer(default: float) -> float:
     while True:
         try:
-            answer = input(f"buffer seconds before/after voice [{default}]: ")
+            answer = safe_input(f"buffer seconds before/after voice [{default}]: ")
         except EOFError:
             return default
         answer = answer.strip()
@@ -231,7 +245,7 @@ def prompt_buffer(default: float) -> float:
 def prompt_subtitles(default: bool) -> bool:
     hint = "Y/n" if default else "y/N"
     try:
-        answer = input(f"generate burned-in subtitles via Whisper? [{hint}]: ")
+        answer = safe_input(f"generate burned-in subtitles via Whisper? [{hint}]: ")
     except EOFError:
         return default
     answer = answer.strip().lower()
@@ -244,7 +258,7 @@ def prompt_whisper_model(default: str) -> str:
     valid = {"tiny", "base", "small", "medium", "large-v3"}
     while True:
         try:
-            answer = input(f"whisper model (tiny/base/small/medium/large-v3) [{default}]: ")
+            answer = safe_input(f"whisper model (tiny/base/small/medium/large-v3) [{default}]: ")
         except EOFError:
             return default
         answer = answer.strip()
@@ -258,7 +272,7 @@ def prompt_whisper_model(default: str) -> str:
 
 def prompt_delete(originals: list[Path]) -> None:
     try:
-        answer = input(f"delete {len(originals)} original mp4 file(s)? [y/N]: ")
+        answer = safe_input(f"delete {len(originals)} original mp4 file(s)? [y/N]: ")
     except EOFError:
         answer = ""
     if answer.strip().lower() != "y":
@@ -392,7 +406,7 @@ def main() -> None:
     make_final = True
     if final.exists():
         try:
-            answer = input(f"{final.name} exists. recreate? [y/N]: ")
+            answer = safe_input(f"{final.name} exists. recreate? [y/N]: ")
         except EOFError:
             answer = ""
         make_final = answer.strip().lower() == "y"
@@ -401,7 +415,7 @@ def main() -> None:
         recreate = True
         if consolidated.exists():
             try:
-                answer = input(f"{consolidated.name} exists. recreate? [y/N]: ")
+                answer = safe_input(f"{consolidated.name} exists. recreate? [y/N]: ")
             except EOFError:
                 answer = ""
             recreate = answer.strip().lower() == "y"
@@ -453,7 +467,7 @@ def main() -> None:
     reuse_vtt = False
     if vtt_path.exists() and not make_final:
         try:
-            answer = input(f"{vtt_path.name} exists. reuse it? [Y/n]: ")
+            answer = safe_input(f"{vtt_path.name} exists. reuse it? [Y/n]: ")
         except EOFError:
             answer = ""
         reuse_vtt = answer.strip().lower() != "n"
