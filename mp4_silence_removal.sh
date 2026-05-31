@@ -436,7 +436,7 @@ def main() -> None:
     if final.exists():
         try:
             answer = safe_input(f"{final.name} exists. recreate? [y/N]: ")
-        except EOFError:
+        except (UndecodableInput, EOFError):
             answer = ""
         make_final = answer.strip().lower() == "y"
 
@@ -445,7 +445,7 @@ def main() -> None:
         if consolidated.exists():
             try:
                 answer = safe_input(f"{consolidated.name} exists. recreate? [y/N]: ")
-            except EOFError:
+            except (UndecodableInput, EOFError):
                 answer = ""
             recreate = answer.strip().lower() == "y"
 
@@ -497,7 +497,7 @@ def main() -> None:
     if vtt_path.exists() and not make_final:
         try:
             answer = safe_input(f"{vtt_path.name} exists. reuse it? [Y/n]: ")
-        except EOFError:
+        except (UndecodableInput, EOFError):
             answer = ""
         reuse_vtt = answer.strip().lower() != "n"
     elif vtt_path.exists() and make_final:
