@@ -165,18 +165,23 @@ def pad_and_merge(ranges: list[tuple[float, float]], pad: float, total: float) -
     return merged
 
 
+class UndecodableInput(Exception):
+    """Raised when a prompt receives a keystroke stdin can't decode."""
+
+
 def safe_input(prompt: str) -> str:
     """input() that survives undecodable keystrokes.
 
     A stray IME / partial multibyte byte (e.g. 0xe3) makes the stdin reader
-    raise UnicodeDecodeError; treat that like an empty line so callers fall
-    back to their default or re-prompt. EOFError still propagates.
+    raise UnicodeDecodeError. Re-raise it as UndecodableInput so callers can
+    tell a garbled keystroke apart from a bare Enter: looping prompts re-prompt,
+    one-shot prompts fall back to their default. EOFError still propagates.
     """
     try:
         return input(prompt)
     except UnicodeDecodeError:
         print()
-        return ""
+        raise UndecodableInput
 
 
 def prompt_threshold(default: float) -> float:
@@ -186,6 +191,8 @@ def prompt_threshold(default: float) -> float:
     while True:
         try:
             answer = safe_input(f"threshold [{default}]: ")
+        except UndecodableInput:
+            continue
         except EOFError:
             return default
         answer = answer.strip()
@@ -206,6 +213,8 @@ def prompt_volume(default: float) -> float:
     while True:
         try:
             answer = safe_input(f"voice volume multiplier (1.0 = unchanged) [{default}]: ")
+        except UndecodableInput:
+            continue
         except EOFError:
             return default
         answer = answer.strip()
@@ -226,6 +235,8 @@ def prompt_buffer(default: float) -> float:
     while True:
         try:
             answer = safe_input(f"buffer seconds before/after voice [{default}]: ")
+        except UndecodableInput:
+            continue
         except EOFError:
             return default
         answer = answer.strip()
@@ -246,7 +257,7 @@ def prompt_subtitles(default: bool) -> bool:
     hint = "Y/n" if default else "y/N"
     try:
         answer = safe_input(f"generate burned-in subtitles via Whisper? [{hint}]: ")
-    except EOFError:
+    except (UndecodableInput, EOFError):
         return default
     answer = answer.strip().lower()
     if not answer:
@@ -259,6 +270,8 @@ def prompt_whisper_model(default: str) -> str:
     while True:
         try:
             answer = safe_input(f"whisper model (tiny/base/small/medium/large-v3) [{default}]: ")
+        except UndecodableInput:
+            continue
         except EOFError:
             return default
         answer = answer.strip()
@@ -273,7 +286,7 @@ def prompt_whisper_model(default: str) -> str:
 def prompt_delete(originals: list[Path]) -> None:
     try:
         answer = safe_input(f"delete {len(originals)} original mp4 file(s)? [y/N]: ")
-    except EOFError:
+    except (UndecodableInput, EOFError):
         answer = ""
     if answer.strip().lower() != "y":
         print("[mp4sr] keeping originals")
