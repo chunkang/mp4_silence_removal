@@ -94,6 +94,14 @@ with VAD filtering, word-level timestamps, and `condition_on_previous_text=False
 and takes each cue's start/end from its first and last word rather than the
 coarser segment estimate.
 
+Whisper's word-level alignment tends to stretch a cue's *first* word backward
+into the pause before it, which makes the subtitle pop up a beat before the
+speaker starts. `transcribe()` clamps that: when the first word "lasts" longer
+than `SUBTITLE_LEAD_CAP_SECONDS` (0.7s), the excess is treated as absorbed
+leading silence and the cue start is brought forward to the cap. Cues also never
+start while the previous one is still on screen. Raise `SUBTITLE_LEAD_CAP_SECONDS`
+if legitimately long opening words get clipped early.
+
 If you rebuild `<prefix>voice_only.mp4`, the `.vtt` is regenerated automatically
 (reusing an old subtitle file from a different cut would desync it) — you're only
 offered to reuse an existing `.vtt` when the video was not rebuilt. If subtitles

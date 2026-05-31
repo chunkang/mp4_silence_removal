@@ -31,6 +31,14 @@ VAD_MIN_SILENCE_MS = 300
 VOLUME_GAIN = 2.0
 WHISPER_MODEL = "medium"
 
+# Whisper's word-level DTW frequently stretches a cue's first word backward into
+# the pause before it, so the subtitle pops up before the speaker starts. A real
+# spoken word rarely lasts longer than this; when the first word appears to, the
+# excess is almost always absorbed leading silence, so we bring the cue start
+# forward to at most this many seconds before the first word's end. Raise it if
+# legitimately long opening words get clipped early.
+SUBTITLE_LEAD_CAP_SECONDS = 0.7
+
 OUTPUT_PREFIX = "_mp4sr_"
 CONSOLIDATED_NAME = f"{OUTPUT_PREFIX}consolidated.mp4"
 FINAL_NAME = f"{OUTPUT_PREFIX}voice_only.mp4"
@@ -327,9 +335,17 @@ def transcribe(mp4: Path, model_size: str) -> list[tuple[float, float, str]]:
         # Prefer the first/last word's timing when available: it tracks the
         # spoken audio more tightly than the segment-level estimate.
         words = getattr(seg, "words", None) or []
-        start = words[0].start if words else seg.start
-        end = words[-1].end if words else seg.end
-        out.append((float(start), float(end), text))
+        start = float(words[0].start if words else seg.start)
+        end = float(words[-1].end if words else seg.end)
+        # Cap the first word's stretched-back onset (see SUBTITLE_LEAD_CAP_SECONDS):
+        # if it "lasts" longer than a plausible spoken word, the excess is leading
+        # silence the DTW absorbed, so move the cue start up to the cap.
+        if words and (words[0].end - start) > SUBTITLE_LEAD_CAP_SECONDS:
+            start = float(words[0].end) - SUBTITLE_LEAD_CAP_SECONDS
+        # Never let a cue appear while the previous one is still on screen.
+        if out and start < out[-1][1] < end:
+            start = out[-1][1]
+        out.append((start, end, text))
     return out
 
 
