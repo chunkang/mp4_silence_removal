@@ -124,6 +124,22 @@ def consolidate(mp4s: list[Path], output: Path) -> None:
         os.unlink(list_file)
 
 
+def is_readable(mp4: Path) -> bool:
+    """True if ffprobe can parse the file's container.
+
+    An action-cam recording interrupted before it was finalized (battery died,
+    card pulled, crash) leaves a truncated file with no moov atom. ffprobe then
+    fails, and feeding such a file to the concat demuxer aborts the whole run
+    ("moov atom not found" -> "Error during demuxing"). Probe each input up
+    front so one bad file can be skipped instead of killing the consolidation.
+    """
+    return subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(mp4)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
 def probe_duration(mp4: Path) -> float:
     out = subprocess.check_output(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -453,6 +469,15 @@ def main() -> None:
             mp4s = find_mp4s(cwd)
             if not mp4s:
                 sys.exit(f"no .mp4 files found in {cwd}")
+            usable = []
+            for p in mp4s:
+                if is_readable(p):
+                    usable.append(p)
+                else:
+                    print(f"[mp4sr] skipping unreadable file (truncated / no moov atom?): {p.name}")
+            if not usable:
+                sys.exit("no readable .mp4 files found; every input failed to probe")
+            mp4s = usable
             print(f"[mp4sr] {len(mp4s)} input file(s), in order:")
             for p in mp4s:
                 print(f"        {p.name}")
