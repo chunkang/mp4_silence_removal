@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Consolidate mp4s in the current directory, strip silence, keep ±3s around voice."""
+"""Consolidate mp4s in the current directory, strip silence, keep ±3s around voice.
+
+Author: Chun Kang <kurapa@kurapa.com>
+"""
 
 from __future__ import annotations
 
